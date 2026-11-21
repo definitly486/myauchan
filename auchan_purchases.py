@@ -6,7 +6,7 @@ Based on the My Auchan 4.1.2 API declarations in:
 https://github.com/definitly486/AuchanReverseEngineering
 
 Required environment:
-  AUCHAN_TOKEN20_PASSWORD  - Token20 password/header value used by the app
+  AUCHAN_TOKEN20_PASSWORD  - optional override; Production value is embedded below
   AUCHAN_DEVICE_ID         - optional override; otherwise a persistent UUID is generated
 
 The normal login flow is Token20 -> CheckPhone (SMS request) -> Token80.
@@ -36,6 +36,10 @@ PERSONAL_CABINET_BASE = os.getenv(
 LOYMAX_BASE = os.getenv(
     "AUCHAN_LOYMAX_BASE", "https://mobile.auchan.ru/ecom"
 ).rstrip("/")
+
+# TokenService.Token20() in the decompiled My Auchan 4.1.2 app selects this
+# value for Environment.Production. Environment variables can override it.
+TOKEN20_PRODUCTION_PASSWORD = "LqX~A4gR"
 
 TIMEOUT = 35
 SESSION = requests.Session()
@@ -134,12 +138,9 @@ def token_value(payload: Any) -> str:
 
 
 def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
-    token20_password = os.getenv("AUCHAN_TOKEN20_PASSWORD")
-    if not token20_password:
-        raise AuchanError(
-            "Не задан AUCHAN_TOKEN20_PASSWORD. Это значение Token20 "
-            "из конфигурации приложения; оно не равно SMS-коду."
-        )
+    token20_password = os.getenv(
+        "AUCHAN_TOKEN20_PASSWORD", TOKEN20_PRODUCTION_PASSWORD
+    )
 
     # IPersonalCabinetApi.Token20:
     # GET /clientauth/token; login/password are HTTP headers.
