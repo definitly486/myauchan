@@ -121,7 +121,7 @@ def _debug(message: str) -> None:
         print(f"[verbose] {message}", file=sys.stderr, flush=True)
 
 
-def request_json(method: str, url: str, **kwargs: Any) -> Any:
+def request_json(method: str, url: str, *, allow_statuses: tuple[int, ...] = (), **kwargs: Any) -> Any:
     safe_headers = _redact(kwargs.get("headers", {}))
     safe_params = _redact(kwargs.get("params", {}))
     safe_json = _redact(kwargs.get("json")) if "json" in kwargs else None
@@ -156,7 +156,7 @@ def request_json(method: str, url: str, **kwargs: Any) -> Any:
             rendered = rendered[:5000] + "\n... <truncated>"
         _debug("response body:\n" + rendered)
 
-    if not response.ok:
+    if not response.ok and response.status_code not in allow_statuses:
         # Do not dump headers: they may contain tokens or account identifiers.
         try:
             body = json.dumps(_redact(response.json()), ensure_ascii=False)
@@ -232,7 +232,32 @@ def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
             "source": "1",
         },
         params={"needHash": "true" if need_hash else "false"},
+        # Auchan returns HTTP 400 with a meaningful CheckPhoneDto when an
+        # SMS was already sent. Treat it as a protocol response, not a fatal
+        # transport error; all other CheckPhone errors are handled below.
+        allow_statuses=(400,),
     )
+
+    # A repeated CheckPhone request can return HTTP 400 while explicitly
+    # saying that an SMS is already pending. In that case reuse the existing
+    # code; do not retry and risk triggering rate limits.
+    if isinstance(check_payload, dict):
+        check_error = first_value(check_payload, "error", "Error")
+        check_result = str(first_value(check_payload, "result", "Result"))
+        check_message = str(first_value(check_payload, "msg", "Msg", "resultmessage", "ResultMessage"))
+        already_sent = (
+            check_result == "2"
+            or "смс с кодом уже отправлено" in check_message.casefold()
+            or "sms already sent" in check_message.casefold()
+        )
+        if already_sent:
+            print("Сервер сообщает, что SMS уже отправлено. Повторный запрос не выполняю.")
+            print("Введите код из ранее отправленного SMS (если сообщение ещё не пришло, подождите перед повторной попыткой).")
+        elif str(check_error) not in ("", "0", "None"):
+            raise AuchanError(
+                "CheckPhone отклонён сервером: "
+                + (check_message or json.dumps(_redact(check_payload), ensure_ascii=False))
+            )
 
     # VerifyPinViewModel obtains Token80ByPhone(phone, pin); TokenService
     # sends GET /clientauth/token with phone/password/deviceid headers.
@@ -441,6 +466,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--all", dest="all_pages", action="store_true",
                         help="Загрузить все страницы истории, используя meta.pagination.total")
+    parser.add_argument("--check-profile", action="store_true",
+                        help="Дополнительно проверить Token80 через GET /cmd/profile (может блокироваться WAF)")
     parser.add_argument("--cheque-number", action="append", default=[],
                         help="Дополнительно запросить один чек по chequeNumber; можно повторять")
     parser.add_argument("--json", dest="json_path",
@@ -466,9 +493,19 @@ def main() -> int:
     _debug(f"Номер телефона: {_mask_phone(phone)}")
     _debug(f"Режим needHash: {args.need_hash}")
     token80 = login_by_sms(phone, device_id, args.need_hash)
-    print("Token80 получен; проверяю его через GET /cmd/profile...")
-    profile = verify_token80(token80)
-    print("Проверка профиля выполнена; Token80 принят API.")
+    print("Token80 получен.")
+    if args.check_profile:
+        print("Дополнительно проверяю Token80 через GET /cmd/profile...")
+        try:
+            verify_token80(token80)
+            print("Проверка профиля выполнена.")
+        except AuchanError as exc:
+            print(
+                "Предупреждение: проверка /cmd/profile не прошла. "
+                "Это не доказывает недействительность Token80; продолжаю запрос истории.\n"
+                f"{exc}",
+                file=sys.stderr,
+            )
 
     history = get_history(token80, args.offset, args.limit, args.all_pages)
     items = unwrap_items(history)
