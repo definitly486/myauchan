@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,7 @@ LOYMAX_BASE = os.getenv(
 TOKEN20_PRODUCTION_PASSWORD = "LqX~A4gR"
 
 TIMEOUT = 35
+VERBOSE = False
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "MyAuchan/4.1.2",
@@ -90,18 +92,79 @@ def get_device_id(explicit: str | None = None) -> str:
         raise AuchanError(f"Не удалось сохранить DeviceId в {device_file}: {exc}") from exc
 
 
+def _mask_phone(value: str) -> str:
+    digits = re.sub(r"\D", "", value)
+    if len(digits) < 5:
+        return "<redacted>"
+    return "*" * (len(digits) - 2) + digits[-2:]
+
+
+def _redact(value: Any, key: str = "") -> Any:
+    """Redact credentials and personal identifiers before verbose logging."""
+    sensitive = re.compile(r"token|password|phone|pin|device.?id|authorization|cookie|secret|udid", re.I)
+    if sensitive.search(key):
+        if "phone" in key.lower() and isinstance(value, str):
+            return _mask_phone(value)
+        return "<redacted>"
+    if isinstance(value, dict):
+        return {str(k): _redact(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact(item) for item in value]
+    if isinstance(value, str):
+        # Also hide phone numbers if they appear inside free-form server messages.
+        return re.sub(r"\+?\d[\d ()-]{8,}\d", lambda m: _mask_phone(m.group(0)), value)
+    return value
+
+
+def _debug(message: str) -> None:
+    if VERBOSE:
+        print(f"[verbose] {message}", file=sys.stderr, flush=True)
+
+
 def request_json(method: str, url: str, **kwargs: Any) -> Any:
+    safe_headers = _redact(kwargs.get("headers", {}))
+    safe_params = _redact(kwargs.get("params", {}))
+    safe_json = _redact(kwargs.get("json")) if "json" in kwargs else None
+    _debug(f"--> {method.upper()} {url}")
+    if safe_headers:
+        _debug("request headers: " + json.dumps(safe_headers, ensure_ascii=False))
+    if safe_params:
+        _debug("query params: " + json.dumps(safe_params, ensure_ascii=False))
+    if safe_json is not None:
+        _debug("request JSON: " + json.dumps(safe_json, ensure_ascii=False))
+
+    started = time.monotonic()
     try:
         response = SESSION.request(method, url, timeout=TIMEOUT, **kwargs)
     except requests.RequestException as exc:
+        _debug(f"network exception after {time.monotonic() - started:.2f}s: {exc}")
         raise AuchanError(f"Сетевая ошибка: {exc}") from exc
+
+    elapsed = time.monotonic() - started
+    _debug(
+        f"<-- HTTP {response.status_code} in {elapsed:.2f}s; "
+        f"content-type={response.headers.get('Content-Type', '<none>')}; "
+        f"content-length={response.headers.get('Content-Length', '<unknown>')}"
+    )
+    if VERBOSE and response.content:
+        try:
+            preview = _redact(response.json())
+            rendered = json.dumps(preview, ensure_ascii=False, indent=2)
+        except ValueError:
+            rendered = str(_redact(response.text))
+        if len(rendered) > 5000:
+            rendered = rendered[:5000] + "\n... <truncated>"
+        _debug("response body:\n" + rendered)
 
     if not response.ok:
         # Do not dump headers: they may contain tokens or account identifiers.
-        body = response.text[:1200]
+        try:
+            body = json.dumps(_redact(response.json()), ensure_ascii=False)
+        except ValueError:
+            body = str(_redact(response.text))
         raise AuchanError(
             f"HTTP {response.status_code} от {url}\n"
-            f"Ответ сервера: {body}"
+            f"Ответ сервера: {body[:1200]}"
         )
     if not response.content:
         return {}
@@ -110,7 +173,7 @@ def request_json(method: str, url: str, **kwargs: Any) -> Any:
     except ValueError as exc:
         raise AuchanError(
             f"Сервер вернул не JSON (HTTP {response.status_code}): "
-            f"{response.text[:500]}"
+            f"{str(_redact(response.text))[:500]}"
         ) from exc
 
 
@@ -138,6 +201,7 @@ def token_value(payload: Any) -> str:
 
 
 def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
+    _debug("Шаг 1/3: получение Token20")
     token20_password = os.getenv(
         "AUCHAN_TOKEN20_PASSWORD", TOKEN20_PRODUCTION_PASSWORD
     )
@@ -153,9 +217,11 @@ def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
         },
     )
     token20 = token_value(token20_payload)
+    _debug("Token20 получен (значение скрыто).")
 
     # IPersonalCabinetApi.CheckPhone:
     # GET /clientprofile/checkphone with source: 1 and needHash query.
+    _debug(f"Шаг 2/3: CheckPhone; needHash={need_hash}; DeviceId скрыт.")
     check_payload = request_json(
         "GET",
         f"{PERSONAL_CABINET_BASE}/clientprofile/checkphone",
@@ -184,10 +250,12 @@ def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
         if message:
             print(f"Сообщение CheckPhone: {message}")
 
+    _debug("CheckPhone завершён; ожидается SMS-код.")
     pin = getpass.getpass("Введите SMS-код: ").strip()
     if not re.fullmatch(r"\d{4}", pin):
         raise AuchanError("Ожидался четырёхзначный SMS-код.")
 
+    _debug("Шаг 3/3: получение Token80 по SMS-коду (код скрыт).")
     token80_payload = request_json(
         "GET",
         f"{PERSONAL_CABINET_BASE}/clientauth/token",
@@ -361,6 +429,8 @@ def main() -> int:
         description="Авторизация Auchan по SMS и выгрузка истории покупок"
     )
     parser.add_argument("--phone", help="Номер телефона; если не указан, будет запрошен")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Подробный HTTP-лог; токены, пароль, SMS-код и телефон маскируются")
     parser.add_argument("--device-id",
                         help="переопределить deviceid (по умолчанию постоянный UUID в ~/.config/auchan-purchases/udid_key)")
     parser.add_argument("--need-hash", dest="need_hash", action="store_true",
@@ -377,6 +447,11 @@ def main() -> int:
                         help="Сохранить полученный результат в JSON-файл")
     args = parser.parse_args()
 
+    global VERBOSE
+    VERBOSE = args.verbose
+    if VERBOSE:
+        _debug("Подробный режим включён. Секретные заголовки и персональные данные маскируются.")
+
     phone = (args.phone or input("Телефон (в международном формате): ")).strip()
     phone = re.sub(r"[^\d+]", "", phone)
     if not re.fullmatch(r"\+?\d{10,15}", phone):
@@ -386,6 +461,10 @@ def main() -> int:
 
     device_id = get_device_id(args.device_id)
     print("DeviceId загружен из постоянной конфигурации.")
+    _debug(f"Personal Cabinet API: {PERSONAL_CABINET_BASE}")
+    _debug(f"Loymax API: {LOYMAX_BASE}")
+    _debug(f"Номер телефона: {_mask_phone(phone)}")
+    _debug(f"Режим needHash: {args.need_hash}")
     token80 = login_by_sms(phone, device_id, args.need_hash)
     print("Token80 получен; проверяю его через GET /cmd/profile...")
     profile = verify_token80(token80)
