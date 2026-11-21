@@ -14,7 +14,9 @@ The optional --all flag follows the history response's meta.pagination.total.
 BeginVerifyPhone/VerifyPhone are a separate phone-change/verification flow and
 are not part of the ordinary login path shown by VerifyPinViewModel.
 The SMS PIN and phone are requested interactively and are never written to disk.
-Tokens are kept in memory only.
+Token80 is cached locally with restrictive permissions (0600) so SMS login
+is normally needed only once. Use --login to force a new SMS login or --logout
+to remove the cached session.
 """
 from __future__ import annotations
 
@@ -52,7 +54,11 @@ SESSION.headers.update({
 
 
 class AuchanError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 
 
 def get_device_id(explicit: str | None = None) -> str:
@@ -164,7 +170,8 @@ def request_json(method: str, url: str, *, allow_statuses: tuple[int, ...] = (),
             body = str(_redact(response.text))
         raise AuchanError(
             f"HTTP {response.status_code} от {url}\n"
-            f"Ответ сервера: {body[:1200]}"
+            f"Ответ сервера: {body[:1200]}",
+            status_code=response.status_code,
         )
     if not response.content:
         return {}
@@ -198,6 +205,67 @@ def token_value(payload: Any) -> str:
         "В ответе TokenDto не найдено поле token. "
         "Проверьте фактический JSON ответа и версию API."
     )
+
+
+def config_dir() -> Path:
+    return Path(
+        os.getenv("AUCHAN_CONFIG_DIR")
+        or (Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "auchan-purchases")
+    ).expanduser()
+
+
+def session_file() -> Path:
+    return config_dir() / "session.json"
+
+
+def load_cached_session() -> dict[str, str] | None:
+    path = session_file()
+    try:
+        if not path.is_file():
+            return None
+        # Do not accept a session file accessible to group/other users.
+        if os.name == "posix" and (path.stat().st_mode & 0o077):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        data = json.loads(path.read_text(encoding="utf-8"))
+        token = data.get("token80") if isinstance(data, dict) else None
+        phone = data.get("phone") if isinstance(data, dict) else None
+        if isinstance(token, str) and token and isinstance(phone, str) and phone:
+            return {"token80": token, "phone": phone}
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def save_cached_session(token80: str, phone: str) -> None:
+    directory = config_dir()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    path = session_file()
+    temporary = path.with_suffix(".json.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump({"token80": token80, "phone": phone}, stream)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def clear_cached_session() -> None:
+    try:
+        session_file().unlink()
+    except FileNotFoundError:
+        pass
 
 
 def login_by_sms(phone: str, device_id: str, need_hash: bool) -> str:
@@ -352,6 +420,9 @@ def history_total(payload: dict[str, Any]) -> int | None:
 
 
 def get_history(token80: str, offset: int, limit: int, all_pages: bool = False) -> dict[str, Any]:
+    # The live API rejects pagination.limit > 10. Treat --limit as a requested
+    # page size and cap it to the server's confirmed maximum.
+    limit = min(limit, 10)
     first = get_history_page(token80, offset, limit)
     if not all_pages:
         return first
@@ -453,7 +524,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Авторизация Auchan по SMS и выгрузка истории покупок"
     )
-    parser.add_argument("--phone", help="Номер телефона; если не указан, будет запрошен")
+    parser.add_argument("--phone", help="Номер телефона; при сохранённой сессии можно не указывать")
+    parser.add_argument("--login", action="store_true",
+                        help="Принудительно выполнить новый вход по SMS, заменив сохранённую сессию")
+    parser.add_argument("--logout", action="store_true",
+                        help="Удалить сохранённую сессию и завершить работу")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Подробный HTTP-лог; токены, пароль, SMS-код и телефон маскируются")
     parser.add_argument("--device-id",
@@ -479,12 +554,23 @@ def main() -> int:
     if VERBOSE:
         _debug("Подробный режим включён. Секретные заголовки и персональные данные маскируются.")
 
-    phone = (args.phone or input("Телефон (в международном формате): ")).strip()
+    if args.logout:
+        clear_cached_session()
+        print("Сохранённая авторизация удалена.")
+        return 0
+
+    if args.limit < 1 or args.limit > 100:
+        raise AuchanError("--limit должен быть в диапазоне 1..100; фактический размер страницы ограничен сервером до 10.")
+
+    cached = None if args.login else load_cached_session()
+    supplied_phone = (args.phone or "").strip()
+    if cached and not supplied_phone:
+        phone = cached["phone"]
+    else:
+        phone = supplied_phone or input("Телефон (в международном формате): ").strip()
     phone = re.sub(r"[^\d+]", "", phone)
     if not re.fullmatch(r"\+?\d{10,15}", phone):
         raise AuchanError("Проверьте формат номера телефона.")
-    if args.limit < 1 or args.limit > 100:
-        raise AuchanError("--limit должен быть в диапазоне 1..100.")
 
     device_id = get_device_id(args.device_id)
     print("DeviceId загружен из постоянной конфигурации.")
@@ -492,8 +578,18 @@ def main() -> int:
     _debug(f"Loymax API: {LOYMAX_BASE}")
     _debug(f"Номер телефона: {_mask_phone(phone)}")
     _debug(f"Режим needHash: {args.need_hash}")
-    token80 = login_by_sms(phone, device_id, args.need_hash)
-    print("Token80 получен.")
+
+    token80 = None
+    if cached and cached.get("phone") == phone:
+        token80 = cached["token80"]
+        print("Загружена сохранённая авторизация; SMS повторно не запрашивается.")
+    elif cached:
+        print("Номер отличается от сохранённой сессии; потребуется новый вход.")
+
+    if token80 is None:
+        token80 = login_by_sms(phone, device_id, args.need_hash)
+        save_cached_session(token80, phone)
+        print(f"Token80 получен и сохранён в {session_file()} (права 600).")
     if args.check_profile:
         print("Дополнительно проверяю Token80 через GET /cmd/profile...")
         try:
@@ -507,7 +603,17 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    history = get_history(token80, args.offset, args.limit, args.all_pages)
+    try:
+        history = get_history(token80, args.offset, args.limit, args.all_pages)
+    except AuchanError as exc:
+        if exc.status_code != 401 or args.login:
+            raise
+        print("Сохранённый Token80 отклонён (HTTP 401). Удаляю сессию и запрашиваю новый SMS-вход.", file=sys.stderr)
+        clear_cached_session()
+        token80 = login_by_sms(phone, device_id, args.need_hash)
+        save_cached_session(token80, phone)
+        print("Новая авторизация сохранена.")
+        history = get_history(token80, args.offset, args.limit, args.all_pages)
     items = unwrap_items(history)
     total = history_total(history)
     if total is not None:
