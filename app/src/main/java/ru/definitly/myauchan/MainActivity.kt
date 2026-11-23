@@ -22,6 +22,14 @@ private const val LOYMAX = "https://mobile.auchan.ru/ecom"
 private const val TOKEN20_PASSWORD = "LqX~A4gR"
 private const val PREFS = "auchan_settings"
 
+private data class AppPalette(val background: Int, val surface: Int, val text: Int, val secondary: Int, val accent: Int, val accentText: Int)
+private fun paletteFor(name: String): AppPalette = when (name) {
+    "dark" -> AppPalette(0xFF17191D.toInt(),0xFF242830.toInt(),0xFFF1F3F5.toInt(),0xFFB4BBC5.toInt(),0xFF536D9B.toInt(),0xFFFFFFFF.toInt())
+    "night" -> AppPalette(0xFF05070B.toInt(),0xFF101722.toInt(),0xFFDCE8F5.toInt(),0xFF8293A8.toInt(),0xFF183B62.toInt(),0xFFDCE8F5.toInt())
+    "auchan" -> AppPalette(0xFFF4F6FA.toInt(),0xFFFFFFFF.toInt(),0xFF18243A.toInt(),0xFF59677D.toInt(),0xFFE31837.toInt(),0xFFFFFFFF.toInt())
+    else -> AppPalette(0xFFF4F6F8.toInt(),0xFFFFFFFF.toInt(),0xFF202630.toInt(),0xFF687383.toInt(),0xFF3569A8.toInt(),0xFFFFFFFF.toInt())
+}
+
 class MainActivity : Activity() {
     private val executor = Executors.newSingleThreadExecutor()
     private lateinit var phoneInput: EditText
@@ -32,6 +40,8 @@ class MainActivity : Activity() {
     private lateinit var loginButton: Button
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
     private val vault by lazy { SessionVault(this) }
+    private val palette get() = paletteFor(prefs.getString("app_theme", "light") ?: "light")
+    private var lastItems: List<JSONObject> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,19 +59,41 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(12))
-            setBackgroundColor(0xFFF5F5F5.toInt())
+            setBackgroundColor(palette.background)
         }
         val title = TextView(this).apply {
             text = "Мои покупки Auchan"
             textSize = 23f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(0xFF202020.toInt())
+            setTextColor(palette.text)
         }
         root.addView(title)
+        val themeSelector = Spinner(this)
+        val themeNames = listOf("Светлая", "Тёмная", "Ночная", "Auchan")
+        val themeKeys = listOf("light", "dark", "night", "auchan")
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, themeNames).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        themeSelector.adapter = adapter
+        themeSelector.setSelection(themeKeys.indexOf(prefs.getString("app_theme", "light")).coerceAtLeast(0))
+        root.addView(themeSelector, LinearLayout.LayoutParams(-1, dp(48)))
+        themeSelector.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val selected = themeKeys[position]
+                if (selected != (prefs.getString("app_theme", "light") ?: "light")) {
+                    val oldPhone = phoneInput.text.toString()
+                    val oldStatus = status.text.toString()
+                    prefs.edit().putString("app_theme", selected).apply()
+                    buildScreen()
+                    phoneInput.setText(oldPhone)
+                    status.text = oldStatus
+                    renderItems(lastItems)
+                }
+            }
+        }
         root.addView(TextView(this).apply {
             text = "История покупок и состав чеков"
             textSize = 14f
-            setTextColor(0xFF666666.toInt())
+            setTextColor(palette.secondary)
             setPadding(0, dp(4), 0, dp(14))
         })
         phoneInput = EditText(this).apply {
@@ -69,26 +101,35 @@ class MainActivity : Activity() {
             inputType = 3
             textSize = 16f
             setSingleLine(true)
+            setTextColor(palette.text)
+            setHintTextColor(palette.secondary)
+            setBackgroundTintList(android.content.res.ColorStateList.valueOf(palette.accent))
         }
         root.addView(phoneInput, LinearLayout.LayoutParams(-1, dp(52)))
         loginButton = Button(this).apply {
             text = "Войти по SMS"
             setOnClickListener { beginLogin() }
+            backgroundTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+            setTextColor(palette.accentText)
         }
         root.addView(loginButton, LinearLayout.LayoutParams(-1, dp(48)))
         loadButton = Button(this).apply {
             text = "Загрузить покупки"
             setOnClickListener { loadHistory() }
+            backgroundTintList = android.content.res.ColorStateList.valueOf(palette.accent)
+            setTextColor(palette.accentText)
         }
         root.addView(loadButton, LinearLayout.LayoutParams(-1, dp(48)))
         allCheck = CheckBox(this).apply {
             text = "Загрузить всю историю (все страницы)"
             isChecked = true
+            setTextColor(palette.text)
+            buttonTintList = android.content.res.ColorStateList.valueOf(palette.accent)
         }
         root.addView(allCheck)
         status = TextView(this).apply {
             textSize = 14f
-            setTextColor(0xFF333333.toInt())
+            setTextColor(palette.text)
             setPadding(0, dp(8), 0, dp(10))
         }
         root.addView(status)
@@ -227,6 +268,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderItems(items: List<JSONObject>) {
+        lastItems = items
         list.removeAllViews()
         if (items.isEmpty()) {
             list.addView(TextView(this).apply { text = "Покупок не найдено."; textSize = 16f })
@@ -236,7 +278,8 @@ class MainActivity : Activity() {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(14), dp(12), dp(14), dp(12))
-                setBackgroundColor(0xFFFFFFFF.toInt())
+                setBackgroundColor(palette.surface)
+                elevation = dp(2).toFloat()
             }
             val date = first(item, "date", "Date")
             val store = first(item, "locationName", "LocationName", "location", "Location").ifBlank { "Магазин не указан" }
@@ -248,18 +291,18 @@ class MainActivity : Activity() {
                 text = "$date · $amount ₽"
                 textSize = 18f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(0xFF222222.toInt())
+                setTextColor(palette.text)
             })
             card.addView(TextView(this).apply {
                 text = store
                 textSize = 16f
                 setPadding(0, dp(3), 0, dp(3))
-                setTextColor(0xFF333333.toInt())
+                setTextColor(palette.text)
             })
             card.addView(TextView(this).apply {
                 text = "Чек $receipt · касса $till · $operation"
                 textSize = 13f
-                setTextColor(0xFF666666.toInt())
+                setTextColor(palette.secondary)
             })
             val order = item.optJSONObject("order_details") ?: item.optJSONObject("OrderDetails") ?: item.optJSONObject("orderDetails")
             if (order != null) {
@@ -288,7 +331,7 @@ class MainActivity : Activity() {
     private fun detail(text: String) = TextView(this).apply {
         this.text = text
         textSize = 13f
-        setTextColor(0xFF555555.toInt())
+        setTextColor(palette.secondary)
         setPadding(0, dp(3), 0, 0)
     }
 
