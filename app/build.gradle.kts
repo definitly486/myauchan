@@ -7,6 +7,14 @@ android {
     namespace = "ru.definitly.myauchan"
     compileSdk = 35
 
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
     defaultConfig {
         applicationId = "ru.definitly.myauchan"
         minSdk = 23
