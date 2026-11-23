@@ -68,7 +68,7 @@ class MainActivity : Activity() {
             hint = "Телефон, например +79991234567"
             inputType = 3
             textSize = 16f
-            singleLine = true
+            setSingleLine(true)
         }
         root.addView(phoneInput, LinearLayout.LayoutParams(-1, dp(52)))
         loginButton = Button(this).apply {
