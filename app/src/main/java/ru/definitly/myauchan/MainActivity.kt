@@ -124,7 +124,8 @@ class MainActivity : Activity() {
                 val alreadySent = result == "2" ||
                     msg.contains("смс с кодом уже отправлено", true) ||
                     msg.contains("sms already sent", true)
-                if (check.opt("error") != null && check.opt("error").toString() !in listOf("0", "null", "" ) && !alreadySent) {
+                val checkError = first(check, "error", "Error")
+                if (checkError.isNotBlank() && checkError !in listOf("0", "null") && !alreadySent) {
                     throw AuchanException("CheckPhone: ${msg.ifBlank { check.toString() }}")
                 }
                 runOnUiThread {
