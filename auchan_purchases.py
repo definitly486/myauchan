@@ -492,32 +492,63 @@ def first_value(obj: dict[str, Any], *keys: str) -> Any:
 
 
 def print_history(items: list[dict[str, Any]]) -> None:
+    """Print history using the field names actually returned by Auchan."""
     if not items:
         print("Покупок в полученной странице не найдено.")
         return
-    print(f"\nПолучено покупок: {len(items)}\n")
+
+    print(f"\\nПолучено записей: {len(items)}\\n")
     for index, item in enumerate(items, 1):
-        # TransactionDetailsDto / LoyaltyProgramMappers use these DTO fields.
         date = first_value(item, "date", "Date")
         store = first_value(item, "locationName", "LocationName", "location", "Location")
         total = first_value(item, "totalValue", "TotalValue")
-        number = first_value(item, "transactionNumber", "TransactionNumber")
         operation = first_value(item, "typeName", "TypeName", "operationType", "OperationType")
-        print(f"{index:>3}. {date} | {store} | {total} | № {number} | {operation}")
-        order = first_value(item, "orderDetails", "OrderDetails")
+        # The API returns trnNo/till, not transactionNumber.
+        receipt_no = first_value(item, "trnNo", "TrnNo", "transactionNumber", "TransactionNumber")
+        till = first_value(item, "till", "Till")
+        transaction_id = first_value(item, "transactionId", "TransactionId")
+        points = first_value(item, "points", "Points")
+        comments = first_value(item, "comments", "Comments")
+        identifier = first_value(item, "identifierNo", "IdentifierNo")
+
+        print(f"{index:>3}. {date} | {store or 'Магазин не указан'} | "
+              f"{total if total != '' else '—'} ₽ | "
+              f"чек {receipt_no or '—'} | касса {till or '—'} | {operation or 'Операция'}")
+
+        if transaction_id:
+            print(f"     ID транзакции: {transaction_id}")
+        if points != "":
+            print(f"     Марки/баллы: {points}")
+        if comments:
+            print(f"     Комментарий: {comments}")
+        if identifier:
+            print(f"     Идентификатор: {identifier}")
+
+        # Actual history payload uses snake_case: order_details.
+        order = first_value(item, "order_details", "OrderDetails", "orderDetails")
         if isinstance(order, dict):
+            discount = first_value(order, "discountValue", "DiscountValue")
+            if discount not in ("", None, 0, 0.0):
+                print(f"     Скидка: {discount} ₽")
             products = first_value(order, "products", "Products")
-            if isinstance(products, list):
+            if isinstance(products, list) and products:
+                print(f"     Товары ({len(products)}):")
                 for product in products:
                     if not isinstance(product, dict):
                         continue
-                    name = first_value(product, "name", "Name")
+                    name = first_value(product, "name", "Name") or "Без названия"
                     quantity = first_value(product, "quantity", "Quantity")
                     value = first_value(product, "value", "Value")
                     code = first_value(product, "code", "Code")
-                    print(f"      - {name} | кол-во: {quantity} | сумма: {value} | код: {code}")
-        if not any((date, store, total, number, operation)):
-            print("     " + json.dumps(item, ensure_ascii=False))
+                    gima_id = first_value(product, "gima_id", "gimaId", "GimaId")
+                    qty_text = f"{quantity} шт." if quantity not in ("", None) else "кол-во не указано"
+                    price_text = f"{value} ₽" if value not in ("", None) else "цена не указана"
+                    print(f"       - {name} | {qty_text} | {price_text}"
+                          + (f" | GIMA: {gima_id}" if gima_id else "")
+                          + (f" | код: {code}" if code else ""))
+        elif operation and ("мар" in str(operation).casefold()):
+            # Mark adjustments legitimately may not have a receipt or products.
+            print("     Состав чека сервером не предоставлен.")
 
 
 def main() -> int:
