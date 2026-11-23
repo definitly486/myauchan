@@ -1,5 +1,5 @@
 name: Android APK
-# Builds the standalone native Kotlin client.
+# Builds the standalone native Kotlin client on every app branch update.
 
 on:
   push:
