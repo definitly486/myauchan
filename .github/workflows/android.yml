@@ -11,6 +11,20 @@ on:
       - "gradle.properties"
       - ".github/workflows/android.yml"
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Что собрать"
+        required: true
+        type: choice
+        options:
+          - debug
+          - release
+        default: release
+      release_tag:
+        description: "Версия релиза (например, v1.0.2)"
+        required: true
+        type: string
+        default: "v1.0.1"
 
 permissions:
   contents: write
@@ -18,7 +32,7 @@ permissions:
 jobs:
   debug:
     name: Build debug APK
-    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')) || (github.event_name == 'workflow_dispatch' && inputs.build_type == 'debug') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,17 +58,19 @@ jobs:
 
   release:
     name: Build and publish signed release
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.build_type == 'release') }}
     runs-on: ubuntu-latest
     env:
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
     steps:
-      - name: Validate signing secrets
+      - name: Validate release version and signing secrets
         shell: bash
         run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\\.[0-9]+\\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo "::error::Invalid release tag: $RELEASE_TAG (expected vX.Y.Z)"; exit 1; }
           test -n "$ANDROID_KEYSTORE_BASE64" || { echo "::error::Missing ANDROID_KEYSTORE_BASE64"; exit 1; }
           test -n "$ANDROID_KEYSTORE_PASSWORD" || { echo "::error::Missing ANDROID_KEYSTORE_PASSWORD"; exit 1; }
           test -n "$ANDROID_KEY_ALIAS" || { echo "::error::Missing ANDROID_KEY_ALIAS"; exit 1; }
@@ -103,6 +119,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: MyAuchan ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: MyAuchan ${{ env.RELEASE_TAG }}
           generate_release_notes: true
           files: app/build/outputs/apk/release/app-release.apk
