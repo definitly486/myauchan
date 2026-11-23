@@ -312,7 +312,7 @@ class MainActivity : Activity() {
             if (body != null) OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body) }
             val code = connection.responseCode
             val stream = if (code in 200..299 || (allow400 && code == 400)) connection.inputStreamOrError() else connection.errorStream
-            val response = stream?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
+            val response = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
             if (code !in 200..299 && !(allow400 && code == 400)) {
                 throw AuchanException("HTTP $code: ${serverMessage(response)}", code)
             }
